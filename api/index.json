@@ -1,0 +1,70 @@
+import { WebClient } from '@slack/web-api';
+import fetch from 'node-fetch';
+
+const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+const SLACK_CHANNEL = process.env.SLACK_CHANNEL || '#goldwag-trading';
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).send('Method Not Allowed');
+  }
+
+  try {
+    const body = req.body;
+    // Quick secret validation from TradingView
+    if (!body.secret || body.secret !== WEBHOOK_SECRET) {
+      return res.status(403).send('Forbidden');
+    }
+
+    const { symbol, price, signal, reason, time } = body;
+
+    // Ask OpenAI for a short analysis
+    const aiPrompt = `Trading alert: ${signal} ${symbol} at ${price}. Reason: ${reason}. Provide 1-sentence summary + 3 bullet points (entry, stop, observation).`;
+    const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: aiPrompt }],
+        max_tokens: 150
+      })
+    });
+    const aiData = await aiResponse.json();
+    const aiText = aiData.choices?.[0]?.message?.content?.trim() || 'No analysis available.';
+
+    // Choose color
+    const color = (signal || '').toString().toUpperCase() === 'BUY' ? '#36a64f' : '#e01e5a';
+
+    // Post to Slack
+    await slackClient.chat.postMessage({
+      channel: SLACK_CHANNEL,
+      attachments: [
+        {
+          color,
+          title: `${signal} — ${symbol}`,
+          fields: [
+            { title: 'Price', value: String(price), short: true },
+            { title: 'Signal', value: reason, short: true },
+            { title: 'Time', value: time, short: false }
+          ],
+          footer: 'Goldwag Trading Group — TradingView',
+          ts: Math.floor(Date.now() / 1000)
+        },
+        {
+          color: '#cccccc',
+          text: `AI Analysis:\n${aiText}`
+        }
+      ]
+    });
+
+    return res.status(200).send('OK');
+  } catch (error) {
+    console.error('Handler error:', error);
+    return res.status(500).send('Internal Server Error');
+  }
+}
